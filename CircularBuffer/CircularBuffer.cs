@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Threading;
 
 namespace CircularBuffer
 {
@@ -36,6 +37,11 @@ namespace CircularBuffer
         private int _size;
 
         /// <summary>
+        /// Semafore for thread safely
+        /// </summary>
+        private readonly SemaphoreSlim _semaphore;
+        
+        /// <summary>
         /// Initializes a new instance of the <see cref="CircularBuffer{T}"/> class.
         /// 
         /// </summary>
@@ -45,6 +51,7 @@ namespace CircularBuffer
         public CircularBuffer(int capacity)
             : this(capacity, new T[] { })
         {
+            _semaphore = new SemaphoreSlim(1, 1);
         }
 
         /// <summary>
@@ -59,7 +66,9 @@ namespace CircularBuffer
         /// Suggestion: use Skip(x).Take(y).ToArray() to build this argument from
         /// any enumerable.
         /// </param>
-        public CircularBuffer(int capacity, T[] items)
+        /// <param name="semaforeInitialCount">The initial number of requests for the semaphore that can be granted concurrently.</param>
+        /// <param name="semaforeMaxCount">The maximum number of requests for the semaphore that can be granted concurrently.</param>
+        public CircularBuffer(int capacity, T[] items, int semaforeInitialCount = 1, int semaforeMaxCount = 1)
         {
             if (capacity < 1)
             {
@@ -83,6 +92,8 @@ namespace CircularBuffer
 
             _start = 0;
             _end = _size == capacity ? 0 : _size;
+            
+            _semaphore = new SemaphoreSlim(semaforeInitialCount, semaforeMaxCount);
         }
 
         /// <summary>
@@ -165,16 +176,24 @@ namespace CircularBuffer
             }
             set
             {
-                if (IsEmpty)
+                _semaphore.Wait();
+                try
                 {
-                    throw new IndexOutOfRangeException(string.Format("Cannot access index {0}. Buffer is empty", index));
+                    if (IsEmpty)
+                    {
+                        throw new IndexOutOfRangeException(string.Format("Cannot access index {0}. Buffer is empty", index));
+                    }
+                    if (index >= _size)
+                    {
+                        throw new IndexOutOfRangeException(string.Format("Cannot access index {0}. Buffer size is {1}", index, _size));
+                    }
+                    int actualIndex = InternalIndex(index);
+                    _buffer[actualIndex] = value;
                 }
-                if (index >= _size)
+                finally
                 {
-                    throw new IndexOutOfRangeException(string.Format("Cannot access index {0}. Buffer size is {1}", index, _size));
+                    _semaphore.Release();
                 }
-                int actualIndex = InternalIndex(index);
-                _buffer[actualIndex] = value;
             }
         }
 
@@ -188,17 +207,25 @@ namespace CircularBuffer
         /// <param name="item">Item to push to the back of the buffer</param>
         public void PushBack(T item)
         {
-            if (IsFull)
+            _semaphore.Wait();
+            try
             {
-                _buffer[_end] = item;
-                Increment(ref _end);
-                _start = _end;
+                if (IsFull)
+                {
+                    _buffer[_end] = item;
+                    Increment(ref _end);
+                    _start = _end;
+                }
+                else
+                {
+                    _buffer[_end] = item;
+                    Increment(ref _end);
+                    ++_size;
+                }
             }
-            else
+            finally
             {
-                _buffer[_end] = item;
-                Increment(ref _end);
-                ++_size;
+                _semaphore.Release();
             }
         }
 
@@ -212,17 +239,25 @@ namespace CircularBuffer
         /// <param name="item">Item to push to the front of the buffer</param>
         public void PushFront(T item)
         {
-            if (IsFull)
+            _semaphore.Wait();
+            try
             {
-                Decrement(ref _start);
-                _end = _start;
-                _buffer[_start] = item;
+                if (IsFull)
+                {
+                    Decrement(ref _start);
+                    _end = _start;
+                    _buffer[_start] = item;
+                }
+                else
+                {
+                    Decrement(ref _start);
+                    _buffer[_start] = item;
+                    ++_size;
+                }
             }
-            else
+            finally
             {
-                Decrement(ref _start);
-                _buffer[_start] = item;
-                ++_size;
+                _semaphore.Release();
             }
         }
 
@@ -232,10 +267,18 @@ namespace CircularBuffer
         /// </summary>
         public void PopBack()
         {
-            ThrowIfEmpty("Cannot take elements from an empty buffer.");
-            Decrement(ref _end);
-            _buffer[_end] = default(T);
-            --_size;
+            _semaphore.Wait();
+            try
+            {
+                ThrowIfEmpty("Cannot take elements from an empty buffer.");
+                Decrement(ref _end);
+                _buffer[_end] = default(T);
+                --_size;
+            }
+            finally
+            {
+                _semaphore.Release();
+            }
         }
 
         /// <summary>
@@ -244,10 +287,18 @@ namespace CircularBuffer
         /// </summary>
         public void PopFront()
         {
-            ThrowIfEmpty("Cannot take elements from an empty buffer.");
-            _buffer[_start] = default(T);
-            Increment(ref _start);
-            --_size;
+            _semaphore.Wait();
+            try
+            {
+                ThrowIfEmpty("Cannot take elements from an empty buffer.");
+                _buffer[_start] = default(T);
+                Increment(ref _start);
+                --_size;
+            }
+            finally
+            {
+                _semaphore.Release();
+            }
         }
 
         /// <summary>
@@ -256,11 +307,19 @@ namespace CircularBuffer
         /// <exception cref="NotImplementedException"></exception>
         public void Clear()
         {
-            // to clear we just reset everything.
-            _start = 0;
-            _end = 0;
-            _size = 0;
-            Array.Clear(_buffer, 0, _buffer.Length);
+            _semaphore.Wait();
+            try
+            {
+                // to clear we just reset everything.
+                _start = 0;
+                _end = 0;
+                _size = 0;
+                Array.Clear(_buffer, 0, _buffer.Length);
+            }
+            finally
+            {
+                _semaphore.Release();
+            }
         }
 
         /// <summary>
@@ -271,15 +330,23 @@ namespace CircularBuffer
         /// <returns>A new array with a copy of the buffer contents.</returns>
         public T[] ToArray()
         {
-            T[] newArray = new T[Size];
-            int newArrayOffset = 0;
-            var segments = ToArraySegments();
-            foreach (ArraySegment<T> segment in segments)
+            _semaphore.Wait();
+            try
             {
-                Array.Copy(segment.Array, segment.Offset, newArray, newArrayOffset, segment.Count);
-                newArrayOffset += segment.Count;
+                T[] newArray = new T[Size];
+                int newArrayOffset = 0;
+                var segments = ToArraySegments();
+                foreach (ArraySegment<T> segment in segments)
+                {
+                    Array.Copy(segment.Array, segment.Offset, newArray, newArrayOffset, segment.Count);
+                    newArrayOffset += segment.Count;
+                }
+                return newArray;
             }
-            return newArray;
+            finally
+            {
+                _semaphore.Release();
+            }
         }
 
         /// <summary>
