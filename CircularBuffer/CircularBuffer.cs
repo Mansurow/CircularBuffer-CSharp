@@ -49,10 +49,7 @@ namespace CircularBuffer
         /// Buffer capacity. Must be positive.
         /// </param>
         public CircularBuffer(int capacity)
-            : this(capacity, new T[] { })
-        {
-            _semaphore = new SemaphoreSlim(1, 1);
-        }
+            : this(capacity, new T[] { }) { }
 
         /// <summary>
         /// Initializes a new instance of the <see cref="CircularBuffer{T}"/> class.
